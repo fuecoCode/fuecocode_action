@@ -2,45 +2,53 @@ name: Keep Render Awake
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # 每10分鐘
+    - cron: "*/5 * * * *"  # 每 5 分鐘（GitHub 排程最小間隔）
   workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: keep-render-awake
+  cancel-in-progress: false
 
 jobs:
   ping:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Warm up & health check
         env:
-          TARGET_URL: ${{ secrets.TARGET_URL }}   # 你在 Secrets 設的 URL
+          TARGET_URL: ${{ secrets.TARGET_URL }}   # 請在 Settings → Secrets 設定
         run: |
           set -Eeuo pipefail
+          : "${TARGET_URL:?TARGET_URL secret is required}"
+
           URL="${TARGET_URL}"
           UA="GH-Actions-HealthCheck"
-          
-          # 嘗試最多 6 次，每次間隔 10 秒（總嘗試時間 ~1 分鐘多一點）
+
+          # 最多嘗試 6 次；遇到暫時性錯誤等一下再試
           for i in {1..6}; do
-            # 連線逾時 10 秒、總逾時 60 秒；追蹤轉址；遇到各種錯誤皆重試
-            # 只取 HTTP 狀態碼；把 502/503/504 當成冷啟動過程會再等
             CODE=$(curl -sS -o /dev/null -w "%{http_code}" \
               -A "$UA" -L --connect-timeout 10 --max-time 60 \
               --retry 3 --retry-all-errors \
               "$URL" || echo "000")
 
             echo "Attempt $i -> HTTP $CODE"
-            
-            # 2xx/3xx 視為成功
+
+            # 2xx/3xx = 成功
             if [ "$CODE" -ge 200 ] && [ "$CODE" -lt 400 ]; then
               echo "OK"
               exit 0
             fi
 
-            # 冷啟動常見：502/503/504 -> 等一下再打
+            # 冷啟動/暫時性：502/503/504/000 → 等 10 秒重試
             if [ "$CODE" = "502" ] || [ "$CODE" = "503" ] || [ "$CODE" = "504" ] || [ "$CODE" = "000" ]; then
               sleep 10
               continue
             fi
 
-            # 其他狀態碼（例如 401/403/404）視需求決定是否直接失敗或繼續嘗試
+            # 其他狀態碼先等一下再試一次
             sleep 10
           done
 
