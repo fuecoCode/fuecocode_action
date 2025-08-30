@@ -22,9 +22,9 @@ jobs:
       GDRIVE_DIR:   ${{ secrets.GDRIVE_DIR }}  # e.g. "gdrive:pg-backups/prod"
 
     steps:
-      - name: Timestamp (UTC)
+      - name: Timestamp (Taipei)
         id: ts
-        run: echo "STAMP=$(date -u +'%Y%m%d_%H%M%S')" >> "$GITHUB_OUTPUT"
+        run: echo "STAMP=$(TZ=Asia/Taipei date +'%Y%m%d_%H%M%S')" >> "$GITHUB_OUTPUT"
 
       - name: Install rclone
         run: |
