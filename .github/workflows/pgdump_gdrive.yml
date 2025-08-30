@@ -15,7 +15,7 @@ jobs:
       PGDATABASE:   ${{ secrets.PGDATABASE }}
       PGUSER:       ${{ secrets.PGUSER }}
       PGPASSWORD:   ${{ secrets.PGPASSWORD }}
-      PGSSLMODE:    require   # Render/雲端DB 通常要求 TLS；如不需要可移除
+      PGSSLMODE:    require   # Render/雲端DB 常見要求 TLS
 
       # --- Google Drive via rclone remote "gdrive" ---
       RCLONE_CONF_B64: ${{ secrets.RCLONE_CONF_B64 }}
@@ -26,14 +26,11 @@ jobs:
         id: ts
         run: echo "STAMP=$(date -u +'%Y%m%d_%H%M%S')" >> "$GITHUB_OUTPUT"
 
-      - name: Install PostgreSQL 17 client + rclone
+      - name: Install rclone
         run: |
           set -eux
-          sudo apt-get update
-          # 關鍵：安裝 17 版 client
-          sudo apt-get install -y postgresql-client-17
           curl -fsSL https://rclone.org/install.sh | sudo bash
-          pg_dump --version
+          rclone version
 
       - name: Restore rclone config
         run: |
@@ -41,21 +38,33 @@ jobs:
           mkdir -p ~/.config/rclone
           echo "$RCLONE_CONF_B64" | base64 -d > ~/.config/rclone/rclone.conf
           chmod 600 ~/.config/rclone/rclone.conf
-          # 驗證 remote 是否存在
-          rclone lsd "${GDRIVE_DIR%/*}" || rclone lsd "$(echo "$GDRIVE_DIR" | cut -d: -f1):"
+          # 驗證 remote 是否存在；若子資料夾不存在不會失敗
+          rclone about "$(echo "$GDRIVE_DIR" | cut -d: -f1):"
 
-      - name: Stream dump to Google Drive
+      - name: Preflight - DB connectivity (dockerized psql 17)
+        run: |
+          set -eux
+          docker run --rm \
+            -e PGPASSWORD="$PGPASSWORD" \
+            -e PGSSLMODE="$PGSSLMODE" \
+            postgres:17 \
+            psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" -c 'SELECT version();'
+
+      - name: Stream dump (dockerized pg_dump 17) -> gzip -> rclone rcat
         run: |
           set -euo pipefail
           FNAME="${PGDATABASE}_${{ steps.ts.outputs.STAMP }}.sql.gz"
-          # 先測試 DB 可連線（可省）
-          psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" -c 'SELECT version();' >/dev/null
+          # 用 postgres:17 內的 pg_dump，確保版本相容
+          docker run --rm \
+            -e PGPASSWORD="$PGPASSWORD" \
+            -e PGSSLMODE="$PGSSLMODE" \
+            postgres:17 \
+            pg_dump -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" \
+              --format=plain --no-owner --no-privileges \
+          | gzip -9 \
+          | rclone rcat -vv "${GDRIVE_DIR}/${FNAME}"
 
-          # 串流上傳（pg_dump 失敗時整個 pipe 會中止）
-          pg_dump --format=plain --no-owner --no-privileges \
-            | gzip -9 \
-            | rclone rcat -vv "${GDRIVE_DIR}/${FNAME}"
-
+      # （可選）保留 7 天
       # - name: Retention - keep 7d
       #   run: |
       #     set -eux
