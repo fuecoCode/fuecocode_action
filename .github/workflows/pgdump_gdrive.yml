@@ -1,0 +1,63 @@
+name: PostgreSQL backup to Google Drive (every 30min)
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # every 30 minutes (UTC)
+  workflow_dispatch: {}
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    env:
+      # --- PostgreSQL conn (Render) ---
+      PGHOST:       ${{ secrets.PGHOST }}
+      PGPORT:       ${{ secrets.PGPORT }}
+      PGDATABASE:   ${{ secrets.PGDATABASE }}
+      PGUSER:       ${{ secrets.PGUSER }}
+      PGPASSWORD:   ${{ secrets.PGPASSWORD }}
+      PGSSLMODE:    require   # Render/雲端DB 通常要求 TLS；如不需要可移除
+
+      # --- Google Drive via rclone remote "gdrive" ---
+      RCLONE_CONF_B64: ${{ secrets.RCLONE_CONF_B64 }}
+      GDRIVE_DIR:   ${{ secrets.GDRIVE_DIR }}  # e.g. "gdrive:pg-backups/prod"
+
+    steps:
+      - name: Timestamp (UTC)
+        id: ts
+        run: echo "STAMP=$(date -u +'%Y%m%d_%H%M%S')" >> "$GITHUB_OUTPUT"
+
+      - name: Install PostgreSQL 17 client + rclone
+        run: |
+          set -eux
+          sudo apt-get update
+          # 關鍵：安裝 17 版 client
+          sudo apt-get install -y postgresql-client-17
+          curl -fsSL https://rclone.org/install.sh | sudo bash
+          pg_dump --version
+
+      - name: Restore rclone config
+        run: |
+          set -eux
+          mkdir -p ~/.config/rclone
+          echo "$RCLONE_CONF_B64" | base64 -d > ~/.config/rclone/rclone.conf
+          chmod 600 ~/.config/rclone/rclone.conf
+          # 驗證 remote 是否存在
+          rclone lsd "${GDRIVE_DIR%/*}" || rclone lsd "$(echo "$GDRIVE_DIR" | cut -d: -f1):"
+
+      - name: Stream dump to Google Drive
+        run: |
+          set -euo pipefail
+          FNAME="${PGDATABASE}_${{ steps.ts.outputs.STAMP }}.sql.gz"
+          # 先測試 DB 可連線（可省）
+          psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" -c 'SELECT version();' >/dev/null
+
+          # 串流上傳（pg_dump 失敗時整個 pipe 會中止）
+          pg_dump --format=plain --no-owner --no-privileges \
+            | gzip -9 \
+            | rclone rcat -vv "${GDRIVE_DIR}/${FNAME}"
+
+      # - name: Retention - keep 7d
+      #   run: |
+      #     set -eux
+      #     rclone delete "${GDRIVE_DIR}" --min-age 7d --drive-use-trash=false
+      #     rclone rmdirs "${GDRIVE_DIR}" --leave-root
